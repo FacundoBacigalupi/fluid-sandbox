@@ -1,0 +1,27 @@
+# Unity generated
+Library/
+Temp/
+Logs/
+obj/
+Build/
+Builds/
+UserSettings/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.csproj
+*.sln
+*.pidb
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# Unity auto-generated meta files for ignored folders
+Library.meta
+Temp.meta
+
+# OS
+.DS_Store
+Thumbs.db
