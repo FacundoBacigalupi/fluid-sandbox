@@ -1,0 +1,109 @@
+// SPH simulation kernels — todos corren en GPU, sin readback a CPU.
+// CSDensity → CSForce → CSIntegrate se encadenan en ese orden cada substep.
+
+#pragma kernel CSDensity
+#pragma kernel CSForce
+#pragma kernel CSIntegrate
+
+RWStructuredBuffer<float4> _Positions;   // xyz = pos,   w = unused
+RWStructuredBuffer<float4> _Velocities;  // xyz = vel,   w = unused
+RWStructuredBuffer<float>  _Densities;
+RWStructuredBuffer<float4> _Forces;      // xyz = force, w = unused
+
+uint   _ParticleCount;
+float  _H;
+float  _RestDensity;
+float  _PressureMult;
+float  _Viscosity;
+float4 _Gravity;      // .xyz = dirección; float4 evita alignment issues con SetVector
+float  _DeltaTime;
+float  _MaxVelocity;
+float4 _BoundsMin;    // .xyz = min
+float4 _BoundsMax;    // .xyz = max
+float  _ParticleRadius;
+float  _Restitution;
+float  _Damping;
+
+// Kernel cúbico W(r,h) = (1 - r/h)^3 y su gradiente
+float W    (float r, float h) { float t = 1.0 - r / h; return t * t * t; }
+float WGrad(float r, float h) { float t = 1.0 - r / h; return -3.0 * t * t / h; }
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+[numthreads(64,1,1)]
+void CSDensity(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _ParticleCount) return;
+
+    float3 pi = _Positions[i].xyz;
+    float  d  = 0.0;
+
+    for (uint j = 0; j < _ParticleCount; j++)
+    {
+        float r = length(_Positions[j].xyz - pi);
+        if (r < _H) d += W(r, _H);
+    }
+
+    _Densities[i] = max(d, 0.001);
+}
+
+[numthreads(64,1,1)]
+void CSForce(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _ParticleCount) return;
+
+    float3 pi  = _Positions[i].xyz;
+    float3 vi  = _Velocities[i].xyz;
+    float  di  = _Densities[i];
+    float  prI = _PressureMult * max(0.0, di - _RestDensity);
+
+    float3 pf = 0, vf = 0;
+
+    for (uint j = 0; j < _ParticleCount; j++)
+    {
+        if (j == i) continue;
+        float3 rij = pi - _Positions[j].xyz;
+        float  r   = length(rij);
+        if (r < 0.0001 || r >= _H) continue;
+
+        float  dj   = _Densities[j];
+        float  prJ  = _PressureMult * max(0.0, dj - _RestDensity);
+        float3 rhat = rij / r;
+        float  grad = WGrad(r, _H);
+
+        pf += -(prI + prJ) * 0.5 / (di * dj) * grad * rhat;
+        vf += (_Velocities[j].xyz - vi) / dj * W(r, _H);
+    }
+
+    _Forces[i] = float4(pf + _Viscosity * vf, 0);
+}
+
+[numthreads(64,1,1)]
+void CSIntegrate(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _ParticleCount) return;
+
+    float3 v   = _Velocities[i].xyz + (_Gravity.xyz + _Forces[i].xyz) * _DeltaTime;
+    float  spd = length(v);
+    if (spd > _MaxVelocity) v = v / spd * _MaxVelocity;
+
+    float3 p    = _Positions[i].xyz + v * _DeltaTime;
+    float  r    = _ParticleRadius;
+    float3 bMin = _BoundsMin.xyz;
+    float3 bMax = _BoundsMax.xyz;
+
+    if (p.x < bMin.x + r) { p.x = bMin.x + r; v.x =  abs(v.x) * _Restitution; v *= _Damping; }
+    if (p.x > bMax.x - r) { p.x = bMax.x - r; v.x = -abs(v.x) * _Restitution; v *= _Damping; }
+    if (p.y < bMin.y + r) { p.y = bMin.y + r; v.y =  abs(v.y) * _Restitution; v *= _Damping; }
+    if (p.y > bMax.y - r) { p.y = bMax.y - r; v.y = -abs(v.y) * _Restitution; v *= _Damping; }
+    if (p.z < bMin.z + r) { p.z = bMin.z + r; v.z =  abs(v.z) * _Restitution; v *= _Damping; }
+    if (p.z > bMax.z - r) { p.z = bMax.z - r; v.z = -abs(v.z) * _Restitution; v *= _Damping; }
+
+    if (any(isnan(p))) { p = 0; v = 0; }
+
+    _Positions[i]  = float4(p, 0);
+    _Velocities[i] = float4(v, 0);
+}
